@@ -8,7 +8,7 @@
 
 #define MAX_FILENAME 128
 #define CHUNK_SIZE 256
-#define MAX_BLOCKS 32
+#define MAX_BLOCKS 32 // change this to something higher for a usable experience
 #define BAT_SIZE ((MAX_BLOCKS+1)/8) // adding 1 to MAX_BLOCKS will make it always round up when dividing
 
 #define ERR_NONE 0

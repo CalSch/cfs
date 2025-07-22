@@ -96,7 +96,7 @@ void cfsLogBAT(CFS cfs) {
 		}
 		printf(" ");
 	}
-	printf(" (total:%d)",sum);
+	printf(" (total: %d / %d)",sum,MAX_BLOCKS);
 	printf("\n");
 }
 
@@ -132,7 +132,7 @@ void cfsFree(CFS* cfs, fsptr ptr, int* err) {
 }
 
 void cfsZeroBlock(CFS* cfs, fsptr ptr) {
-	memset(&cfs->blocks[ptr],0,sizeof(FSBlock));
+	memset(&(cfs->blocks[ptr]),0,sizeof(FSBlock));
 }
 
 CFS cfsInit() {

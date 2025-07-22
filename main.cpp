@@ -414,9 +414,9 @@ void cfsPrintFile(CFS* cfs, fsptr file) {
 			printf(" | ");
 			for (int k=start;k<end;k++) {
 				unsigned char v = cfs->blocks[ch.data].file_ch_data.data[k];
-				printf("%c ",isprint(v)?v:'.');
+				printf("%c",isprint(v)?v:'.');
 			}
-				printf("  ");
+				printf(" ");
 			printf("\n");
 			// if ((j+1)%16==0)
 		}
@@ -599,15 +599,15 @@ fsptr cfsPath2Ptr(CFS* cfs, char* path, fsptr base, int* err) {
 }
 
 
-void cfsTree(CFS* cfs, fsptr idx, int level) {
+void cfsTree(CFS* cfs, fsptr ptr, int level) {
 	char* indent = (char*)malloc(2*level);
 	for (int i=0;i<level*2;i++)
 		indent[i]=' ';
 	indent[level*2]='\0';
 
-	DirectoryHeader dir = PTR2DIR(idx);
+	DirectoryHeader dir = PTR2DIR(ptr);
 	
-	printf("%sdir: '%s' (%d -> %d)\n", indent, dir.name, idx, dir.next);
+	printf("%sdir: '%s' (%d -> %d)\n", indent, dir.name, ptr, dir.next);
 	ListDirResults res = cfsListDir(cfs,dir);
 	for (int i=0;i<res.dir_count;i++) {
 		cfsTree(cfs,res.dir_ptrs[i],level+1);
@@ -710,6 +710,8 @@ underlying information. Wow, very cool.
 	printf("\n----------------------\nWriting!\n----------------------\n\n");
 	cfsWriteFile(&cfs,ptr,text,&err);
 	// cfsWriteFile(&cfs,ptr,"hello world!",&err);
+
+	cfsPrintFile(&cfs,ptr);
 
 	char* text2;
 	printf("\n----------------------\nReading!\n----------------------\n\n");

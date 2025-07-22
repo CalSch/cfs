@@ -1,13 +1,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 
 
 #define LOGd(expr) printf(#expr " = %d\n", (expr))
 #define LOGs(expr) printf(#expr " = %s\n", (expr))
 
 #define MAX_FILENAME 128
-#define CHUNK_SIZE 256
+#define CHUNK_SIZE 128
 #define MAX_BLOCKS 32 // change this to something higher for a usable experience
 #define BAT_SIZE ((MAX_BLOCKS+1)/8) // adding 1 to MAX_BLOCKS will make it always round up when dividing
 
@@ -15,6 +16,10 @@
 #define ERR_ALLOC 1
 #define ERR_FILENAME 2
 
+#define PTR2FILE(ptr) cfs->blocks[ptr].file
+#define PTR2DIR(ptr) cfs->blocks[ptr].dir
+#define PTR2FHEAD(ptr) cfs->blocks[ptr].file_ch_head
+#define PTR2FDATA(ptr) cfs->blocks[ptr].file_ch_data
 
 
 typedef unsigned int fsptr; // just an index for CFS.chunks
@@ -61,6 +66,14 @@ struct CFS {
 	FSBlock blocks[MAX_BLOCKS];
 };
 
+struct ListDirResults {
+	int file_count;
+	FileHeader* files;
+	fsptr* file_ptrs;
+	int dir_count;
+	DirectoryHeader* dirs;
+	fsptr* dir_ptrs;
+};
 
 
 void print_bytes(void *ptr, size_t size) {
@@ -116,6 +129,10 @@ void cfsFree(CFS* cfs, fsptr ptr, int* err) {
 	int i = ptr/8;
 	int j = ptr%8;
 	cfs->bat[i] &= ~(1<<j);
+}
+
+void cfsZeroBlock(CFS* cfs, fsptr ptr) {
+	memset(&cfs->blocks[ptr],0,sizeof(FSBlock));
 }
 
 CFS cfsInit() {
@@ -244,7 +261,6 @@ fsptr cfsCreateDir(CFS* cfs, fsptr parent_ptr, char* fname, int* err) {
 	return idx;
 }
 
-#define PTR2FILE(ptr) cfs->blocks[ptr].file
 void cfsRemoveFile(CFS* cfs, fsptr idx, int* err) {
 	FileHeader head = cfs->blocks[idx].file;
 	DirectoryHeader* parent = &cfs->blocks[head.parent].dir;
@@ -299,7 +315,6 @@ void cfsRemoveFile(CFS* cfs, fsptr idx, int* err) {
 	cfsFree(cfs,idx,&err2);
 }
 
-#define PTR2DIR(ptr) cfs->blocks[ptr].dir
 void cfsRemoveDir(CFS* cfs, fsptr idx, int* err) {
 	DirectoryHeader head = cfs->blocks[idx].dir;
 	DirectoryHeader* parent = &cfs->blocks[head.parent].dir;
@@ -376,14 +391,123 @@ void cfsRemoveDir(CFS* cfs, fsptr idx, int* err) {
 	cfsFree(cfs,idx,&err2);
 }
 
-struct ListDirResults {
-	int file_count;
-	FileHeader* files;
-	fsptr* file_ptrs;
-	int dir_count;
-	DirectoryHeader* dirs;
-	fsptr* dir_ptrs;
-};
+void cfsPrintFile(CFS* cfs, fsptr file) {
+	FileHeader fh = PTR2FILE(file);
+	printf("File '%s':\n",fh.name);
+	printf("chunks=%d\n",fh.chunks);
+	fsptr chunk_ptr = fh.start;
+	for (int i=0;i<fh.chunks;i++) {
+		FileChunkHeader ch = cfs->blocks[chunk_ptr].file_ch_head;
+		printf("  chunk %d ptr=%d next=%d size=%d\n",i,chunk_ptr,ch.next,ch.size);
+		for (int j=0;j<ch.size/8+1;j++) {
+			int start = j*8;
+			int end = j*8+8;
+			int extra = 0;
+			if (end > ch.size) {
+				extra = end-ch.size;
+				end = ch.size;
+			}
+			for (int k=start;k<end;k++)
+				printf("%02x ",cfs->blocks[ch.data].file_ch_data.data[k]);
+			for (int k=0;k<extra;k++)
+				printf("   ");
+			printf(" | ");
+			for (int k=start;k<end;k++) {
+				unsigned char v = cfs->blocks[ch.data].file_ch_data.data[k];
+				printf("%c ",isprint(v)?v:'.');
+			}
+				printf("  ");
+			printf("\n");
+			// if ((j+1)%16==0)
+		}
+
+		chunk_ptr = ch.next;
+	}
+	printf("\n");
+}
+
+void cfsWriteFile(CFS* cfs, fsptr file, char* text, int* err) {
+	//TODO: errors
+	FileHeader& f = PTR2FILE(file);
+	fsptr fhptr = f.start;
+
+	// Go to last chunk
+	while (PTR2FHEAD(fhptr).next != 0)
+		fhptr = PTR2FHEAD(fhptr).next;
+
+	// Seek to end of chunk
+	// FileChunkHeader fh = cfs->blocks[f.start].file_ch_head;
+	int seek = PTR2FHEAD(fhptr).size;
+
+	// LOGd(strlen(text));
+	// LOGd(seek);
+
+	for (int i=0;i<strlen(text);i++) {
+		if (seek > CHUNK_SIZE) {
+			printf("OH NO, THIS IS VERY BAD!\n");
+			LOGd(seek);
+			LOGd(CHUNK_SIZE);
+			return;
+		}
+		if (seek == CHUNK_SIZE) {
+			seek = 0;
+			// printf("\n  Got to next chunk, creating a new one\n");
+			f.chunks++;
+			
+			// Allocate next chunk
+			fsptr next = cfsAlloc(cfs,err);
+			fsptr next_data = cfsAlloc(cfs,err);
+
+			// Zero-out the new blocks
+			cfsZeroBlock(cfs,next);
+			cfsZeroBlock(cfs,next_data);
+
+			// Set ptrs for next chunk
+			PTR2FHEAD(fhptr).next = next;
+			PTR2FHEAD(next).data = next_data;
+
+			
+			// Move on to writing to the next chunk
+			fhptr = next;
+		}
+		PTR2FDATA(PTR2FHEAD(fhptr).data).data[seek] = text[i];
+		seek++;
+		PTR2FHEAD(fhptr).size++;
+	}
+}
+
+int cfsReadFile(CFS* cfs, fsptr file, char** text) {
+	int size = 0;
+	FileHeader fh = PTR2FILE(file);
+	fsptr chunk_ptr = fh.start;
+
+	// Count the sizes of all chunks
+	for (int i=0;i<fh.chunks;i++) {
+		FileChunkHeader ch = cfs->blocks[chunk_ptr].file_ch_head;
+		
+		size += ch.size;
+
+		chunk_ptr = ch.next;
+	}
+
+	// Reset chunk_ptr after counting
+	chunk_ptr = fh.start;
+
+	*text = (char*)malloc(size);
+	int seek=0;
+	for (int i=0;i<fh.chunks;i++) {
+		FileChunkHeader ch = cfs->blocks[chunk_ptr].file_ch_head;
+		for (int j=0;j<ch.size;j++) {
+			char v = PTR2FDATA(ch.data).data[j];
+			(*text)[seek] = v;
+			seek++;
+		}
+
+		chunk_ptr = ch.next;
+	}
+
+	return size;
+}
 
 ListDirResults cfsListDir(CFS* cfs, DirectoryHeader dir) {
 	ListDirResults res;
@@ -421,10 +545,64 @@ ListDirResults cfsListDir(CFS* cfs, DirectoryHeader dir) {
 	return res;
 }
 
+fsptr cfsPath2Ptr(CFS* cfs, char* path, fsptr base, int* err) {
+	// int part_count=0;
+	// char **parts;
+	char *token, *str, *tofree;
+	tofree = str = strdup(path);  // We own str's memory now.
+	// printf("im goin'\n");
+	
+	int i=-1;
+	while ((token = strsep(&str,"/"))) {
+		i++;
+		// printf("tkn='%s' base=%d\n",token,base);
+		if (strlen(token)==0)
+			continue;
+		if (strcmp(token,"..")==0) {
+			// This *should* be a directory
+			base = PTR2DIR(base).parent;
+			// printf("going back\n");
+			continue;
+		}
+		ListDirResults listdir = cfsListDir(cfs,PTR2DIR(base));
+		// printf("	dirs: ");
+		bool found=false;
+		for (int j=0;j<listdir.dir_count;j++) {
+			// printf("%s, ",listdir.dirs[j].name);
+			if (strcmp(listdir.dirs[j].name,token)==0) {
+				base = listdir.dir_ptrs[j];
+				// printf("found it\n");
+				found=true;
+				break;
+			}
+		}
+		if (found)
+			continue;
+		// printf("\n");
+		// printf("	files: ");
+		for (int j=0;j<listdir.file_count;j++) {
+			// printf("%s, ",listdir.files[j].name);
+			if (strcmp(listdir.files[j].name,token)==0) {
+				base = listdir.file_ptrs[j];
+				// printf("found it (file)\n");
+				found=true;
+				break;
+			}
+		}
+		if (found)
+			break;
+		// printf("\n");
+		// printf("oh no!\n");
+	}
+	free(tofree);
+	return base;
+}
+
+
 void cfsTree(CFS* cfs, fsptr idx, int level) {
 	char* indent = (char*)malloc(2*level);
 	for (int i=0;i<level*2;i++)
-	indent[i]=' ';
+		indent[i]=' ';
 	indent[level*2]='\0';
 
 	DirectoryHeader dir = PTR2DIR(idx);
@@ -487,8 +665,8 @@ int main() {
 	// printf("CFS = %fkib\n", (float)sizeof(CFS)/1024.f);
 
 	int err = 0;
-	// CFS cfs = cfsInit();
-	CFS cfs = cfsLoad("fs",&err);
+	CFS cfs = cfsInit();
+	// CFS cfs = cfsLoad("fs",&err);
 	// cfsLogBAT(cfs);
 	
 	// fsptr cool_dir   = cfsCreateDir (&cfs, cfs.root, "F1", &err);
@@ -496,7 +674,7 @@ int main() {
 	// fsptr cool_file5 = cfsCreateFile(&cfs, cool_dir, "Y", &err);
 	// fsptr cool_dir2  = cfsCreateDir (&cfs, cool_dir, "F2", &err);
 	// fsptr cool_file6 = cfsCreateFile(&cfs, cool_dir2, "Z", &err);
-	// fsptr cool_file  = cfsCreateFile(&cfs, cfs.root, "A", &err);
+	fsptr cool_file  = cfsCreateFile(&cfs, cfs.root, "A", &err);
 	// fsptr cool_file2 = cfsCreateFile(&cfs, cfs.root, "B", &err);
 	// fsptr cool_file3 = cfsCreateFile(&cfs, cfs.root, "C", &err);
 
@@ -509,8 +687,46 @@ int main() {
 	printf("Tree:\n");
 	cfsTree(&cfs,cfs.root,0);
 
+	fsptr ptr=cfsPath2Ptr(&cfs,"A",cfs.root,&err);
+	// LOGd(ptr);
+	if (ptr == 0) {
+		printf("I couldn't find the file :(\n");
+		return 1;
+	}
+	// cfsPrintFile(&cfs,ptr);
 
-	cfsSave(&cfs,"fs2",&err);
+
+	char text[] = R"(
+hello worl!
+i am 15 minutes old!
+i am humgry
+
+And now for lots of text (with newlines for fun) to show
+that files are split into multiple chunks of size 128 (or 256 if
+I'm feeling spicy) without compromising the integrity of the
+underlying information. Wow, very cool.
+)";
+
+	printf("\n----------------------\nWriting!\n----------------------\n\n");
+	cfsWriteFile(&cfs,ptr,text,&err);
+	// cfsWriteFile(&cfs,ptr,"hello world!",&err);
+
+	char* text2;
+	printf("\n----------------------\nReading!\n----------------------\n\n");
+	int n = cfsReadFile(&cfs,ptr,&text2);
+	
+	printf("Read (%d): %s\n",n,text2);
+	
+	cfsLogBAT(cfs);
+
+	if (strcmp(text,text2)) {
+		printf("They aren't the same :(\n");
+	} else {
+		printf("They are the same :) yipe!\n");
+	}
+	// cfsPrintFile(&cfs,ptr);
+
+	// cfsSave(&cfs,"fs",&err);
 
 	return 0;
 }
